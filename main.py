@@ -168,3 +168,21 @@ async def wear(req: WearRequest, db: AsyncSession = Depends(get_session)):
         entries.append(wh)
     await db.commit()
     return JSONResponse({"recorded": len(entries)})
+
+@app.get("/clothes", response_model=List[ClothOut])
+async def get_clothes(
+    user_id: str, # クエリパラメータで受け取る
+    db: AsyncSession = Depends(get_session)
+):
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+    stmt = select(Cloth).where(
+        Cloth.user_id == uid,
+        Cloth.status == "ACTIVE"
+    ).order_by(Cloth.created_at.desc())
+    
+    res = await db.execute(stmt)
+    return res.scalars().all()
