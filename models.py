@@ -17,6 +17,10 @@ class User(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
+    # 追加: 外部認証プロバイダ関連
+    auth_provider_id = Column(String, unique=True, nullable=True)
+    auth_providers = relationship("UserAuthProvider", back_populates="user", cascade="all, delete-orphan")
+
     clothes = relationship("Cloth", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -46,3 +50,16 @@ class WornHistory(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     cloth = relationship("Cloth", back_populates="worn_history")
+
+
+class UserAuthProvider(Base):
+    __tablename__ = "user_auth_providers"
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
+    provider = Column(String, nullable=False)
+    provider_user_id = Column(String, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="auth_providers")

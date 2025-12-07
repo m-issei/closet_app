@@ -15,7 +15,7 @@ from sqlalchemy import select, and_, not_, exists
 
 from models import Base, User, Cloth, WornHistory
 from schemas import ClothCreate, ClothOut, RecommendRequest, RecommendResponse, WearRequest
-from services.ai_stylist import analyze_image, recommend_outfit
+from services.ai_stylist import analyze_image, get_recommendation
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://user:password@localhost:5432/closet")
 
@@ -41,11 +41,9 @@ async def get_session() -> AsyncSession:
         yield session
 
 
-@app.on_event("startup")
-async def on_startup():
-    # Ensure DB models exist: in production use migrations (alembic)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+# Note: We intentionally do NOT run Base.metadata.create_all() here to avoid
+# colliding with an existing database schema created via migrations/`init_db.sql`.
+# In development you may enable table creation, but in production use Alembic.
 
 
 @app.post("/clothes", response_model=ClothOut)
@@ -65,15 +63,14 @@ async def create_cloth(
 
     image_url = str(dest)
 
-    # analyze image (mock or real)
-    features = analyze_image(image_url)
+    # analyze image (mock or OpenAI depending on env)
+    features = await analyze_image(image_url)
 
-    # ensure user exists
+    # ensure user exists (create minimal record if not present)
     q = select(User).where(User.user_id == uuid.UUID(user_id))
     res = await db.execute(q)
     user = res.scalars().first()
     if user is None:
-        # create minimal user
         user = User(user_id=uuid.UUID(user_id))
         db.add(user)
         await db.commit()
@@ -111,47 +108,54 @@ async def recommend(req: RecommendRequest, db: AsyncSession = Depends(get_sessio
     wash_days = user.wash_cycle_days or 3
     cutoff_date = date.today() - timedelta(days=wash_days)
 
-    # 3) query clothes: status = 'ACTIVE' and not in LAUNDRY and not worn within wash_cycle_days
-    q = select(Cloth).where(
+    # Subquery: recent worn cloth ids
+    recent_worn_subq = select(WornHistory.cloth_id).where(WornHistory.worn_date >= cutoff_date)
+
+    # Single query: active clothes for user, not in laundry, and not recently worn
+    stmt = select(Cloth).where(
         Cloth.user_id == req.user_id,
         Cloth.status == "ACTIVE",
+        Cloth.cloth_id.not_in(recent_worn_subq) if hasattr(Cloth.cloth_id, 'not_in') else ~Cloth.cloth_id.in_(recent_worn_subq),
+        Cloth.status != "LAUNDRY",
     )
-    res = await db.execute(q)
-    clothes = res.scalars().all()
 
-    # filter out laundry and recently worn
-    candidates = []
-    for c in clothes:
-        # status check already done; skip LAUNDRY anyway
-        if c.status == "LAUNDRY":
-            continue
-        # check worn history
-        q2 = select(WornHistory).where(WornHistory.cloth_id == c.cloth_id, WornHistory.worn_date >= cutoff_date)
-        res2 = await db.execute(q2)
-        recent = res2.scalars().first()
-        if recent:
-            continue
-        candidates.append({
+    res = await db.execute(stmt)
+    candidates_objs = res.scalars().all()
+
+    candidates = [
+        {
             "cloth_id": c.cloth_id,
             "category": c.category,
             "features": c.features,
             "image_url": c.image_url,
-        })
+        }
+        for c in candidates_objs
+    ]
 
     if not candidates:
         return RecommendResponse(clothes=[], reason="候補となる服が見つかりませんでした。")
 
     # 4) call AI stylist (mock) to pick
-    ai_result = recommend_outfit(candidates, temp_c=temp_c, weather=weather, tpo=req.tpo)
+    # Use AI stylist (real or mock) via async wrapper
+    ai_result = await get_recommendation(candidates, temp_c=temp_c, weather=weather, tpo=req.tpo)
 
-    selected_ids = {s["cloth_id"] for s in ai_result["selected"]}
+    # ai_result['selected'] may contain cloth dicts with cloth_id keys (UUID or str)
+    selected_ids = set()
+    for s in ai_result.get("selected", []):
+        cid = s.get("cloth_id") if isinstance(s, dict) else s
+        if cid is None:
+            continue
+        # normalize to UUID-like object; SQLAlchemy will accept strings too
+        selected_ids.add(cid)
 
-    # fetch selected cloth objects for full output
-    q_sel = select(Cloth).where(Cloth.cloth_id.in_(list(selected_ids)))
-    res = await db.execute(q_sel)
-    sel_objs = res.scalars().all()
+    if selected_ids:
+        q_sel = select(Cloth).where(Cloth.cloth_id.in_(list(selected_ids)))
+        res = await db.execute(q_sel)
+        sel_objs = res.scalars().all()
+    else:
+        sel_objs = []
 
-    return RecommendResponse(clothes=sel_objs, reason=ai_result["reason"])
+    return RecommendResponse(clothes=sel_objs, reason=ai_result.get("reason", ""))
 
 
 @app.post("/wear")

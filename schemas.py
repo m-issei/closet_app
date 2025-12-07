@@ -24,7 +24,7 @@ class ClothOut(BaseModel):
     user_id: UUID
     image_url: str
     category: str
-    features: Any
+    features: FeatureSchema
     status: str
 
     class Config:

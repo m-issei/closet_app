@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import hashlib
 import json
+import asyncio
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import random
@@ -43,13 +44,128 @@ def _mock_analyze_image(image_path: str) -> Dict[str, Any]:
     }
 
 
-def analyze_image(image_path: str) -> Dict[str, Any]:
+async def analyze_image(image_path: str) -> Dict[str, Any]:
     """
-    Analyze image to extract features. If OPENAI_API_KEY is present, you could
-    implement a real OpenAI Vision call here. For now we use a mock.
+    Analyze image to extract features. If OPENAI_API_KEY is present, call OpenAI Vision (async).
+    Falls back to mock when API key is not present.
     """
-    # Placeholder for real API call
+    if OPENAI_API_KEY:
+        try:
+            return await analyze_image_with_openai(image_path)
+        except Exception:
+            # fallback to mock on any error
+            return _mock_analyze_image(image_path)
     return _mock_analyze_image(image_path)
+
+
+# ---------- OpenAI / production helpers (async) ----------
+if OPENAI_API_KEY:
+    try:
+        from openai import AsyncOpenAI
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    except Exception:
+        _openai_client = None
+
+
+async def analyze_image_with_openai(image_url: str) -> Dict[str, Any]:
+    """
+    OpenAI (GPT-4o) を使って画像を解析する。
+    画像認識用の正しいペイロード形式に修正済み。
+    """
+    if not OPENAI_API_KEY or _openai_client is None:
+        return _mock_analyze_image(image_url)
+
+    prompt_text = (
+        "以下のJSON形式で出力してください: "
+        "{\"color\": str, \"pattern\": str, \"material\": str, "
+        "\"warmth_level\": int(1-5), \"is_rain_ok\": bool, \"seasons\": list(str)}。 "
+        "画像を解析してファッション特徴を抽出してください。"
+    )
+
+    try:
+        resp = await _openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a professional fashion analyst."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                                "detail": "low"  # コスト節約のためlow推奨（十分認識できます）
+                            }
+                        }
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+        
+        content = resp.choices[0].message.content
+        if isinstance(content, (str, bytes)):
+            return json.loads(content)
+        elif isinstance(content, dict):
+            return content
+            
+    except Exception as e:
+        print(f"OpenAI API Error: {e}")
+        # エラー時はモックにフォールバック
+        pass
+
+    return _mock_analyze_image(image_url)
+
+async def recommend_with_openai(candidates: List[Dict[str, Any]], temp_c: float, weather: str, tpo: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Call OpenAI to get a recommended subset and reasoning. Returns dict {selected: [...], reason: str}.
+    If API is not available, raises an exception.
+    """
+    if not OPENAI_API_KEY or _openai_client is None:
+        raise RuntimeError("OpenAI client not configured")
+
+    system = "あなたはプロのスタイリストです。候補リストと天候・気温・TPOを考慮し、最適な組み合わせをJSONで返してください。"
+    user_msg = {
+        "candidates": candidates,
+        "temp_c": temp_c,
+        "weather": weather,
+        "tpo": tpo,
+    }
+
+    try:
+        resp = await _openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user_msg, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content
+        if isinstance(content, str):
+            obj = json.loads(content)
+        else:
+            obj = content
+        # Expecting {'selected': [ { 'cloth_id': '...', ... }, ... ], 'reason': '...'}
+        return obj
+    except Exception:
+        raise
+
+
+async def get_recommendation(candidates: List[Dict[str, Any]], temp_c: float, weather: str, tpo: Optional[str] = None) -> Dict[str, Any]:
+    """
+    High-level wrapper: use OpenAI when available, otherwise fallback to local heuristic.
+    """
+    if OPENAI_API_KEY:
+        try:
+            return await recommend_with_openai(candidates, temp_c, weather, tpo)
+        except Exception:
+            return recommend_outfit(candidates, temp_c, weather, tpo)
+    else:
+        return recommend_outfit(candidates, temp_c, weather, tpo)
 
 
 def _heuristic_score(item: Dict[str, Any], temp_c: float, weather: str, tpo: Optional[str]) -> float:
