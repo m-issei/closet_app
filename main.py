@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select, and_, not_, exists
+from fastapi.staticfiles import StaticFiles
 
 from models import Base, User, Cloth, WornHistory
 from schemas import ClothCreate, ClothOut, RecommendRequest, RecommendResponse, WearRequest
@@ -23,6 +24,7 @@ engine = create_async_engine(DATABASE_URL, echo=False, future=True)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 app = FastAPI(title="SmartOutfit API")
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,7 +63,9 @@ async def create_cloth(
         content = await file.read()
         f.write(content)
 
-    image_url = str(dest)
+    # image_url = str(dest)
+    base_url = "http://localhost:8000" 
+    image_url = f"{base_url}/uploads/{filename}"
 
     # analyze image (mock or OpenAI depending on env)
     features = await analyze_image(image_url)
