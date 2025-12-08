@@ -35,7 +35,11 @@ SmartOutfit/
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ステータス列用の ENUM 型
-CREATE TYPE IF NOT EXISTS outfit_status AS ENUM ('ACTIVE', 'LAUNDRY', 'DISCARDED');
+DO $$ BEGIN
+    CREATE TYPE outfit_status AS ENUM ('ACTIVE', 'LAUNDRY', 'DISCARDED');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
 -- users テーブル
 CREATE TABLE IF NOT EXISTS users (

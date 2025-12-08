@@ -81,8 +81,10 @@ struct CameraView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showPicker) {
-                ImagePicker(sourceType: .camera) { image in
+            // .sheet(isPresented: $showPicker) {
+            //     ImagePicker(sourceType: .camera) { image in
+            .sheet(isPresented: $showPicker) { 
+                ImagePicker(sourceType: .photoLibrary) { image in
                     showPicker = false
                     guard let image = image else { return }
                     capturedImage = image
